@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOTAM to Boundaries v01</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+  <script src="https://unpkg.com/@turf/turf"></script>
+<style>
+/* General Styles */
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+}
+
+#map {
+  width: 100%;
+  height: 90vh;
+  position: relative; /* Ensure absolute children are relative to the map container */
+}
+
+#controls {
+  padding: 10px;
+}
+
+button {
+  margin: 5px 0;
+}
+
+/* Control Panel Styling */
+#control-panel {
+  position: absolute; /* Position it relative to the map container */
+  top: 0; /* Align with the top of the map */
+  right: 5px; /* Offset by 5px from the right edge */
+  z-index: 1000; /* Ensure it stays on top of the map */
+  width: 250px;
+  background-color: #f9f9f9;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); /* Add a shadow for better visibility */
+}
+
+/* Table Styling */
+#outerBoundaryTable {
+  width: 100%;
+  border-collapse: collapse;
+  max-height: 80vh; /* Limit table height */
+/*  display: block; */ /* Enable scrolling for table body */
+}
+
+#outerBoundaryTable thead {
+  display: table; /* Keep the header static */
+  width: 100%;
+}
+
+#outerBoundaryTable tbody {
+  display: block; /* Scrollable body */
+  max-height: 75vh; /* Prevent it from exceeding the control panel */
+  overflow-y: auto;
+}
+
+#outerBoundaryTable th, 
+#outerBoundaryTable td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
+#outerBoundaryTable th {
+  background-color: #f4f4f4;
+  font-weight: bold;
+}
+
+#outerBoundaryTable tbody tr:hover {
+  background-color: #f0f0f0;
+}
+
+/* Custom Scrollbar Styling */
+#outerBoundaryTable tbody::-webkit-scrollbar {
+  width: 16px; /* Double the default scrollbar width */
+}
+
+#outerBoundaryTable tbody::-webkit-scrollbar-thumb {
+  background-color: #ccc;
+  border-radius: 8px;
+}
+
+#outerBoundaryTable tbody::-webkit-scrollbar-thumb:hover {
+  background-color: #999;
+}
+
+  /* Custom Icon Styles */
+  .custom-icon {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    text-align: center;
+    line-height: 20px;
+    border-radius: 50%;
+    font-size: 12px;
+    font-weight: bold;
+  }
+
+  /* Status Indicator Styles */
+  .included {
+    background-color: green;
+    color: white;
+    border: 2px solid darkgreen;
+  }
+
+  .excluded {
+    background-color: red;
+    color: white;
+    border: 2px solid darkred;
+  }
+
+  /* Image Hue Change */
+  img.huechange {
+    filter: hue-rotate(120deg); /* Change the marker color by rotating the hue */
+  }
+
+  /* Number Icon Default Style */
+  .number-icon-default {
+    background-image: url("https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png");
+    text-align: center;
+    color: black;
+    text-shadow: 1px 1px #000000;
+    font-size: large;
+    font-weight: bold;
+    width: 25px;
+    height: 41px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .number-icon-default span {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: large;
+  }
+
+  .number-icon-default.huechange {
+    filter: hue-rotate(120deg); /* Green tint or desired color effect */
+  }
+
+</style>
+
+
+</head>
+<body>
+<div id="map">
+  <!-- Map Content -->
+  <div id="control-panel">
+    <h3><center>Selected Outer Boundary Points</center></h3>
+    <table id="outerBoundaryTable">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Coordinates</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Rows will be dynamically populated by JavaScript -->
+      </tbody>
+    </table>
+  </div>
+</div>
+<div id="controls">
+  <input type="file" id="file-input" accept=".txt" />
+  <button id="generate-airspace">Generate Airspace</button>
+  <a id="downloadLink" style="display:none">Download Restricted Airspace File</a>
+
+</div>
+
+
+<script>
+let initialSortDone = false; // Track if the initial sort has been applied
+let map = L.map('map').setView([51.505, -0.09], 6); // Default view
+let airspaceFile = ""; // this will contain the airspace to be output
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19
+}).addTo(map);
+
+  // Prevent map interactions while dragging the table
+  const controlPanel = document.getElementById('control-panel');
+  L.DomEvent.disableClickPropagation(controlPanel);
+  L.DomEvent.on(controlPanel, 'mousewheel', L.DomEvent.stopPropagation);
+
+
+let polygons = [];
+let outerBoundaryPoints = [];
+let outerBoundaryLayer;
+let pointMarkers = []; // Store references to markers for toggling
+
+document.getElementById('file-input').addEventListener('change', function (event) {
+  const file = event.target.files[0];
+  initialSortDone = false;
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const inputAirspace = parseNotamFile(e.target.result);
+      displayPolygons(inputAirspace);
+      airspaceFile = generateAirspaceFile(inputAirspace);
+    };
+    reader.readAsText(file);
+  }
+});
+
+// Event listener for the "Generate Airspace" button
+document.getElementById('generate-airspace').addEventListener('click', generateAirspace);
+
+// Helper function to parse NOTAM file and convert it to GeoJSON
+function parseNotamFile(content) {
+  const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const polygons = [];
+  let currentPolygon = [];
+  let polygonName = '';
+  let lowerAltitude = '';
+  let upperAltitude = '';
+
+  for (const line of lines) {
+    if (line.startsWith('AN')) {
+      // Extract the name from the AN line
+      const match = line.match(/^AN\s+([A-Za-z0-9 ]+)/);
+      if (match) {
+        polygonName = match[1].trim();
+      } else {
+        console.warn(`Skipped invalid AN line: ${line}`);
+      }
+    } else if (line.startsWith('AL')) {
+      // Extract the lower altitude from the AL line
+      const match = line.match(/^AL\s+([A-Za-z0-9 ]+)/);
+      if (match) {
+        lowerAltitude = match[1].trim();
+      } else {
+        console.warn(`Skipped invalid AL line: ${line}`);
+      }
+    } else if (line.startsWith('AH')) {
+      // Extract the upper altitude from the AH line
+      const match = line.match(/^AH\s+([A-Za-z0-9 ]+)/);
+      if (match) {
+        upperAltitude = match[1].trim();
+      } else {
+        console.warn(`Skipped invalid AH line: ${line}`);
+      }
+    } else if (line.startsWith('DP')) {
+      // Extract the coordinates from DP lines
+      const match = line.match(/DP\s+(\d+:\d+:\d+)\s+([NS])\s+(\d+:\d+:\d+)\s+([EW])/);
+      if (match) {
+        const [, lat, latDir, lon, lonDir] = match;
+        const latitude = parseFloat(latDir === 'S' ? -dmsToDecimal(lat) : dmsToDecimal(lat));
+        const longitude = parseFloat(lonDir === 'W' ? -dmsToDecimal(lon) : dmsToDecimal(lon));
+        currentPolygon.push([longitude, latitude]); // GeoJSON format uses [lon, lat]
+      } else {
+        console.warn(`Skipped invalid DP line: ${line}`);
+      }
+    } else if (currentPolygon.length > 0) {
+      // When a new polygon starts, save the current polygon with its name, altitudes, and coordinates
+      polygons.push({
+        name: polygonName,
+        lowerAltitude: lowerAltitude,
+        upperAltitude: upperAltitude,
+        coordinates: currentPolygon
+      });
+      currentPolygon = [];
+      polygonName = ''; // Reset the name for the next polygon
+      lowerAltitude = ''; // Reset the lower altitude
+      upperAltitude = ''; // Reset the upper altitude
+    }
+  }
+
+  // If the last polygon has data, add it as well
+  if (currentPolygon.length > 0) {
+    polygons.push({
+      name: polygonName,
+      lowerAltitude: lowerAltitude,
+      upperAltitude: upperAltitude,
+      coordinates: currentPolygon
+    });
+  }
+
+  // Convert to GeoJSON format
+  const geoJSON = {
+    type: 'FeatureCollection',
+    features: polygons.map(polygon => ({
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [polygon.coordinates]
+      },
+      properties: {
+        name: polygon.name,
+        lowerAltitude: polygon.upperAltitude,
+        upperAltitude: "UNLIM",
+	colour: "blue"
+      }
+    }))
+  };
+
+  console.log('Generated GeoJSON:', geoJSON);
+  return geoJSON;
+}
+
+function dmsToDecimal(dms) {
+  const [degrees, minutes, seconds] = dms.split(':').map(parseFloat);
+  return degrees + minutes / 60 + seconds / 3600;
+}
+
+// Helper function to convert decimal degrees to DMS
+function decimalToDms(decimal) {
+  const degrees = Math.floor(Math.abs(decimal));
+  const minutes = Math.floor((Math.abs(decimal) - degrees) * 60);
+  const seconds = ((Math.abs(decimal) - degrees) * 60 - minutes) * 60;
+  
+  // Zero-padding for degrees, minutes, and seconds
+  const degreesFormatted = String(degrees).padStart(3, '0');
+  const minutesFormatted = String(minutes).padStart(2, '0');
+  const secondsFormatted = seconds.toFixed(3).padStart(6, '0'); // Includes leading zero and three decimal places
+
+  return `${degreesFormatted}:${minutesFormatted}:${secondsFormatted}`;
+}
+
+function OLDdecimalToDms(decimal) {
+  const degrees = Math.floor(Math.abs(decimal));
+  const minutes = Math.floor((Math.abs(decimal) - degrees) * 60);
+  const seconds = ((Math.abs(decimal) - degrees) * 60 - minutes) * 60;
+  return `${degrees}:${minutes}:${seconds.toFixed(3)}`;
+}
+
+
+function NEWdisplayPolygons(geojsonData, clearExisting = true, createMarkers = true, clearBoundary = true) {
+  if (clearExisting) {
+    // Clear existing polygons if clearExisting is true
+    polygons.forEach(layer => map.removeLayer(layer)); // Clear existing polygons
+    polygons = [];
+  }
+
+  if (clearBoundary) {
+    // Clear the boundary points if clearBoundary is true
+    outerBoundaryPoints = [];
+  }
+
+  if (createMarkers) {
+    // Clear markers if createMarkers is true
+    pointMarkers.forEach(marker => map.removeLayer(marker));
+    pointMarkers = [];
+  }
+
+  const bounds = [];
+  L.geoJSON(geojsonData, {
+    style: function (feature) {
+      // Use the colour property from the GeoJSON data for the polygon color
+      return {
+        color: feature.properties.colour || 'blue', // Default to blue if colour is not provided
+        fillOpacity: 0.5
+      };
+    },
+    onEachFeature: function (feature, layer) {
+      polygons.push(layer);
+      bounds.push(...feature.geometry.coordinates[0].map(coord => [coord[1], coord[0]]));
+
+      if (createMarkers) {
+        // Add all points to the outer boundary points list
+        feature.geometry.coordinates[0].forEach(point => {
+          outerBoundaryPoints.push({ coords: point, included: true });
+        });
+
+        // Draw the outer boundary
+        drawOuterBoundary();
+      }
+    }
+  }).addTo(map);
+
+  if (bounds.length > 0) {
+    map.fitBounds(bounds); // Recenter and resize the map to fit all polygons
+  }
+}
+
+function displayPolygons(geojsonData, clearExisting = true, createMarkers = true, clearBoundary = true) {
+  if (clearExisting) {
+    // Clear existing polygons if clearExisting is true
+    polygons.forEach(layer => map.removeLayer(layer)); // Clear existing polygons
+    polygons = [];
+  }
+
+  if (clearBoundary) {
+    // Clear the boundary points if clearBoundary is true
+    outerBoundaryPoints = [];
+  }
+
+  if (createMarkers) {
+    // Clear markers if createMarkers is true
+    pointMarkers.forEach(marker => map.removeLayer(marker));
+    pointMarkers = [];
+  }
+
+  const bounds = [];
+  L.geoJSON(geojsonData, {
+    style: function (feature) {
+      // Use the colour property from the GeoJSON data for the polygon color
+      return {
+        color: feature.properties.colour || 'grey', // Default if colour is not provided
+        fillOpacity: 0.5
+      };
+    },
+    onEachFeature: function (feature, layer) {
+      polygons.push(layer);
+      bounds.push(...feature.geometry.coordinates[0].map(coord => [coord[1], coord[0]]));
+
+      if (createMarkers) {
+        // Add all points to the outer boundary points list
+        feature.geometry.coordinates[0].forEach(point => {
+          outerBoundaryPoints.push({ coords: point, included: true });
+        });
+
+      }
+    }
+  }).addTo(map);
+
+  if (bounds.length > 0) {
+    map.fitBounds(bounds); // Recenter and resize the map to fit all polygons
+  }
+
+  if (createMarkers) {
+    // Update point list and draw initial outer boundary
+    drawOuterBoundary();
+  }
+}
+
+
+
+// Function to update the table dynamically
+function updatePointList() {
+  const tableBody = document.querySelector("#outerBoundaryTable tbody");
+  tableBody.innerHTML = ""; // Clear the table body
+
+  // Populate the table with points
+  outerBoundaryPoints.forEach((point, index) => {
+    const row = document.createElement("tr");
+    row.dataset.index = index; // Set the index for reference
+
+    // Create table cells
+    const numberCell = document.createElement("td");
+    numberCell.textContent = point.number;
+
+    const coordsCell = document.createElement("td");
+    // Format coordinates to 5 decimal places
+    const formattedLat = point.coords[1].toFixed(5);
+    const formattedLon = point.coords[0].toFixed(5);
+    coordsCell.textContent = `[${formattedLat}, ${formattedLon}]`;
+
+    const statusCell = document.createElement("td");
+    statusCell.textContent = point.included ? "Included" : "Excluded";
+
+    // Append cells to the row
+    row.appendChild(numberCell);
+    row.appendChild(coordsCell);
+    row.appendChild(statusCell);
+
+    // Append row to the table
+    tableBody.appendChild(row);
+  });
+
+  // Make the table rows sortable
+  new Sortable(document.querySelector("#outerBoundaryTable tbody"), {
+    animation: 150, // Smooth animation during drag
+    onStart: function () {
+      map.dragging.disable(); // Disable map dragging
+    },
+    onEnd: function (evt) {
+      map.dragging.enable(); // Re-enable map dragging
+
+      const oldIndex = evt.oldIndex;
+      const newIndex = evt.newIndex;
+
+      // Rearrange the points in outerBoundaryPoints
+      const [movedPoint] = outerBoundaryPoints.splice(oldIndex, 1);
+      outerBoundaryPoints.splice(newIndex, 0, movedPoint);
+
+      // Renumber the points
+      outerBoundaryPoints.forEach((point, index) => {
+        point.number = index + 1;
+      });
+
+      // Redraw the map and table
+      drawOuterBoundary();
+      updatePointList();
+    },
+  });
+}
+
+function orderPolygonClockwise(points) {
+  // Remove duplicates
+  const uniquePoints = Array.from(new Set(points.map(p => JSON.stringify(p)))).map(p => JSON.parse(p));
+
+  // Find the centroid of all points
+  const center = uniquePoints.reduce((acc, point) => {
+    acc.lat += point.coords[1]; // Latitude
+    acc.lon += point.coords[0]; // Longitude
+    return acc;
+  }, { lat: 0, lon: 0 });
+
+  center.lat /= uniquePoints.length;
+  center.lon /= uniquePoints.length;
+
+  // Find the most northerly point (highest latitude)
+  const mostNortherly = uniquePoints.reduce((northern, point) => {
+    return point.coords[1] > northern.coords[1] ? point : northern;
+  });
+
+  // Sort points based on polar angle relative to the centroid (clockwise)
+  uniquePoints.sort((a, b) => {
+    const angleA = Math.atan2(a.coords[1] - center.lat, a.coords[0] - center.lon);
+    const angleB = Math.atan2(b.coords[1] - center.lat, b.coords[0] - center.lon);
+    return angleB - angleA;  // Reverse the order for clockwise sorting
+  });
+
+  // Rotate the sorted points to start with the most northerly point
+  const mostNortherlyIndex = uniquePoints.indexOf(mostNortherly);
+  return [...uniquePoints.slice(mostNortherlyIndex), ...uniquePoints.slice(0, mostNortherlyIndex)];
+}
+
+function drawOuterBoundary() {
+  if (outerBoundaryLayer) {
+    map.removeLayer(outerBoundaryLayer);
+  }
+
+  // Perform the initial sort using orderPolygonClockwise only once
+  if (!initialSortDone) {
+    const orderedPoints = orderPolygonClockwise(outerBoundaryPoints);
+    orderedPoints.forEach((point, index) => {
+      point.number = index + 1; // Assign numbers in the correct order
+    });
+    outerBoundaryPoints = orderedPoints; // Update the global points array
+    initialSortDone = true; // Mark the initial sort as done
+    updatePointList();
+  }
+
+  // Draw the boundary polygon
+  outerBoundaryLayer = L.polygon(
+    outerBoundaryPoints.filter(point => point.included).map(point => [point.coords[1], point.coords[0]]),
+    { color: "green" }
+  ).addTo(map);
+
+  // Remove existing markers
+  pointMarkers.forEach(marker => marker.remove());
+  pointMarkers = [];
+
+  // Draw updated markers
+  outerBoundaryPoints.forEach((point) => {
+    const numberIcon = L.divIcon({
+      className: `number-icon-default ${point.included ? "huechange" : ""}`,
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [0, -40],
+      html: `<span>${point.number}</span>`,
+    });
+
+    const marker = L.marker([point.coords[1], point.coords[0]], {
+      icon: numberIcon,
+      title: `${point.number}`,
+    }).addTo(map);
+
+    marker.on("click", function () {
+      point.included = !point.included; // Toggle inclusion
+      drawOuterBoundary(); // Redraw the boundary
+      updatePointList(); // Update the table display
+    });
+
+    pointMarkers.push(marker);
+  });
+}
+
+
+
+// Function to move a GeoJSON point by a certain distance (in kilometers) in a specific direction using Turf.js
+function movePoint(point, direction, distance) {
+  let bearing;
+  switch (direction) {
+    case "north":
+      bearing = 0; // 0° is north
+      break;
+    case "east":
+      bearing = 90; // 90° is east
+      break;
+    case "south":
+      bearing = 180; // 180° is south
+      break;
+    case "west":
+      bearing = 270; // 270° is west
+      break;
+    default:
+      throw new Error("Invalid direction specified.");
+  }
+
+  // Use Turf's destination function to move the point by the specified distance and bearing
+  let movedPoint = turf.destination(point, distance, bearing, { units: 'kilometers' });
+
+  return movedPoint.geometry.coordinates; // Return the new coordinates [lon, lat]
+}
+
+function generateBoundary(currentPoint, direction, distance, boundaryPoints) {
+  // Convert the currentPoint coordinates to GeoJSON format for Turf.js
+  let geoJSONPoint = turf.point(currentPoint); // We are only passing the [lon, lat] as required by Turf.js
+  
+  // Move the point using the movePoint function
+  let nextPointCoords = movePoint(geoJSONPoint, direction, distance);
+  
+  
+  // Push the new point into the boundaryPoints array
+  boundaryPoints.push(nextPointCoords);
+  
+  // Return the new point object for the next iteration
+  return nextPointCoords;
+}
+
+function generateAirspace() {
+  const boundariesGeoJSON = createBoundaries();
+  const airspaceBoundaries = generateAirspaceFile(boundariesGeoJSON);
+
+  airspaceFile = airspaceBoundaries;
+  console.log(airspaceFile);
+  downloadRestrictedAirspace(airspaceFile);
+  return;
+}
+
+function createBoundaries() {
+  if (outerBoundaryPoints.length === 0) {
+    alert("No outer boundary points available.");
+    return;
+  }
+
+  // Filter points to include only those with included: true
+  const includedPoints = outerBoundaryPoints.filter(point => point.included);
+
+  if (includedPoints.length === 0) {
+    alert("No points with 'included: true' are available.");
+    return;
+  }
+
+  // Step 1: Determine the most northerly, southerly, easterly, and westerly points from included points
+  let mNP = includedPoints.reduce((max, point) => point.coords[1] > max.coords[1] ? point : max, includedPoints[0]);
+  let mSP = includedPoints.reduce((min, point) => point.coords[1] < min.coords[1] ? point : min, includedPoints[0]);
+  let mEP = includedPoints.reduce((max, point) => point.coords[0] > max.coords[0] ? point : max, includedPoints[0]);
+  let mWP = includedPoints.reduce((min, point) => point.coords[0] < min.coords[0] ? point : min, includedPoints[0]);
+
+  // Determine indices of mNP and mSP
+  let mNPIndex = includedPoints.indexOf(mNP);
+  let mSPIndex = includedPoints.indexOf(mSP);
+
+  // Generate West Boundary (left boundary, clockwise)
+  let westBoundaryPoints = [];
+  let currentPoint = mSP.coords; // Start at mSP
+  westBoundaryPoints.push([currentPoint[0], currentPoint[1]]); // Add mSP to the boundary points
+
+  currentPoint = generateBoundary(currentPoint, "south", 5, westBoundaryPoints); // Move 5km south
+  currentPoint = generateBoundary([mWP.coords[0], currentPoint[1]], "west", 5, westBoundaryPoints); // Move west
+  currentPoint = generateBoundary([currentPoint[0], mNP.coords[1]], "north", 5, westBoundaryPoints); // Move north
+  westBoundaryPoints.push([mNP.coords[0], currentPoint[1]]); // Move east to mNP
+  westBoundaryPoints.push([mNP.coords[0], mNP.coords[1]]); // Move south to mNP
+
+  // Insert intermediate points for West Boundary
+  for (let index = includedPoints.length - 1; index >= 0; index--) {
+    const point = includedPoints[index];
+    if (index > mNPIndex && index >= mSPIndex) {
+      westBoundaryPoints.push([point.coords[0], point.coords[1]]);
+    }
+  }
+
+  // Generate East Boundary (right boundary, clockwise with east offset)
+  let eastBoundaryPoints = [];
+  currentPoint = mNP.coords; // Start at mNP
+  eastBoundaryPoints.push([currentPoint[0], currentPoint[1]]); // Add mNP to the boundary points
+
+  currentPoint = generateBoundary(currentPoint, "north", 5, eastBoundaryPoints); // Move 5km north
+  currentPoint = generateBoundary([mEP.coords[0], currentPoint[1]], "east", 5, eastBoundaryPoints); // Move east
+  currentPoint = generateBoundary([currentPoint[0], mSP.coords[1]], "south", 5, eastBoundaryPoints); // Move south
+  eastBoundaryPoints.push([mSP.coords[0], currentPoint[1]]); // Move west to mSP
+  eastBoundaryPoints.push([mSP.coords[0], mSP.coords[1]]); // Return to mSP
+
+  // Insert intermediate points for East Boundary
+  for (let index = includedPoints.length - 1; index >= 0; index--) {
+    const point = includedPoints[index];
+    if (index > mNPIndex && index <= mSPIndex) {
+      eastBoundaryPoints.push([point.coords[0], point.coords[1]]);
+    }
+  }
+
+  // Create GeoJSON for the West and East Boundaries
+  let westBoundaryGeoJSON = {
+    type: 'Feature',
+    properties: {
+      name: "West Boundary",
+      lowerAltitude: "GND",
+      upperAltitude: "UNLIM",
+      colour: "red"},
+    geometry: {
+      type: 'Polygon',
+      coordinates: [westBoundaryPoints]
+    }
+  };
+  let eastBoundaryGeoJSON = {
+    type: 'Feature',
+    properties: {
+      name: "East Boundary",
+      lowerAltitude: "GND",
+      upperAltitude: "UNLIM",
+      colour: "green"},
+    geometry: {
+      type: 'Polygon',
+      coordinates: [eastBoundaryPoints]
+    }
+  };
+
+  // Combine boundaries into a FeatureCollection
+  let boundariesGeoJSON = {
+    type: 'FeatureCollection',
+    features: [westBoundaryGeoJSON, eastBoundaryGeoJSON]
+  };
+
+
+  // Draw both boundaries on the map
+  displayPolygons(boundariesGeoJSON, false, false, false);
+
+  console.log("Boundaries: ", boundariesGeoJSON);
+
+  return boundariesGeoJSON;
+}
+
+function generateAirspaceFile(geojsonData) {
+  if (!geojsonData || geojsonData.type !== "FeatureCollection") {
+    throw new Error("Invalid GeoJSON data. Expected a FeatureCollection.");
+  }
+
+//  let airspaceFile = "";
+
+  // Iterate through each feature in the GeoJSON
+  geojsonData.features.forEach(feature => {
+    const { properties, geometry } = feature;
+
+    // Validate that the necessary properties and geometry exist
+    if (!properties || !geometry || geometry.type !== "Polygon") {
+      console.warn("Skipped invalid feature:", feature);
+      return;
+    }
+
+    const { name, lowerAltitude, upperAltitude } = properties;
+    const coordinates = geometry.coordinates[0]; // Outer ring of the polygon
+
+    // Generate airspace block
+    let airspaceBlock = "AC R\r\n";
+
+    if (name) {
+      airspaceBlock += `AN ${name}\r\n`;
+    } else {
+      console.warn("Feature missing 'name' property. Using 'Unnamed Airspace'.");
+      airspaceBlock += "AN Unnamed Airspace\r\n";
+    }
+
+    airspaceBlock += `AL ${lowerAltitude || "GND"}\r\n`; // Default to "GND" if not specified
+    airspaceBlock += `AH ${upperAltitude || "UNLIM"}\r\n`; // Default to "UNLIM" if not specified
+
+    // Convert coordinates to DP lines
+    coordinates.forEach(coord => {
+      const [lon, lat] = coord; // GeoJSON uses [lon, lat]
+      const dpLine = `DP ${decimalToDms(lat)} N ${decimalToDms(lon)} W\r\n`;
+      airspaceBlock += dpLine;
+    });
+
+    // Close the polygon loop
+    const [firstLon, firstLat] = coordinates[0];
+    airspaceBlock += `DP ${decimalToDms(firstLat)} N ${decimalToDms(firstLon)} W\r\n`;
+    airspaceBlock += `\r\n`;
+    
+// Append the airspace block to the file
+    airspaceFile += airspaceBlock + "\r\n";
+  });
+
+  return airspaceFile;
+}
+function downloadRestrictedAirspace(content) {
+  // Create a Blob for the file content
+  const blob = new Blob([content], { type: 'text/plain' });
+
+  // Create a temporary anchor element
+  const tempLink = document.createElement('a');
+  tempLink.href = URL.createObjectURL(blob);
+  tempLink.download = 'restricted_airspace.txt'; // File name for download
+
+  // Programmatically trigger a click event
+  tempLink.click();
+
+  // Clean up by revoking the Blob URL
+  URL.revokeObjectURL(tempLink.href);
+}
+</script>
+</body>
+</html>
