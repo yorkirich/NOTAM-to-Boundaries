@@ -22,4 +22,6 @@ When the user is satisfied with the shape fo the outer boundary clicking the 'Ge
 
 The generated airspace file should be validated before use.
 
+https://youtu.be/i74i3IeQxn8
+
 No warranty, implied or otherwise, is made as to the accuracy of data created by this utility.  As always, the responsibility for flight is entirely with the individual.
